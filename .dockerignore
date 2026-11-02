@@ -1,0 +1,11 @@
+data/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+.env
+*.tar
+*.tar.gz
+*.zip
+.git/
+.DS_Store
