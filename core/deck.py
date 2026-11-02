@@ -1,7 +1,7 @@
 """Deck loading: .pptx (python-pptx) and .pdf (PyMuPDF), plus slide-image rendering.
 
-Rendering: LibreOffice headless -> PDF -> pdftoppm PNGs. If that fails, each slide gets a
-generated text card so the viewer never breaks.
+Rendering: LibreOffice headless -> PDF -> page PNGs when LibreOffice exists; otherwise the built-in
+python-pptx renderer (core/pptx_render.py). PDFs use pdftoppm or PyMuPDF. A text card is the last resort.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import List, Optional
 
 DATA = Path(__file__).resolve().parent.parent / "data"
-RENDER_DIR = DATA / "renders"
+RENDER_DIR = Path(os.environ["DN_RENDER_DIR"]) if os.environ.get("DN_RENDER_DIR") else DATA / "renders"
 
 
 @dataclass
@@ -184,21 +184,50 @@ def soffice_bin() -> Optional[str]:
     return shutil.which("soffice") or shutil.which("libreoffice")
 
 
+def _pdf_pages(pdf: str, out: Path, dpi: int) -> str:
+    """PDF -> out/slide-N.png. poppler's pdftoppm when present, else PyMuPDF (pure pip). Returns method."""
+    if shutil.which("pdftoppm"):
+        try:
+            subprocess.run(["pdftoppm", "-r", str(dpi), "-png", pdf, str(out / "slide")],
+                           capture_output=True, timeout=300, check=True)
+            if list(out.glob("slide-*.png")):
+                return "pdftoppm"
+        except Exception:
+            pass
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz
+    doc = fitz.open(pdf)
+    w = len(str(len(doc)))
+    for i, page in enumerate(doc, 1):
+        page.get_pixmap(dpi=dpi).save(str(out / f"slide-{i:0{w}d}.png"))
+    return "pymupdf"
+
+
 def render_slides(path: str, slides: List[Slide], dpi: int = 110) -> dict:
-    """Fill slide.image_path. Returns {'method':..., 'error':...}."""
+    """Fill slide.image_path with a real picture of every slide. Returns {'method':..., 'error':...}.
+
+    .pdf : pdftoppm (poppler) -> PyMuPDF.
+    .pptx: LibreOffice -> PDF -> pages (best fidelity) -> built-in python-pptx renderer
+           (core/pptx_render.py, no LibreOffice needed, e.g. on Streamlit Cloud) -> text card.
+    Set DN_NO_LIBREOFFICE=1 to force the built-in pptx renderer.
+    """
     key = file_hash(path)
     out = RENDER_DIR / key
     out.mkdir(parents=True, exist_ok=True)
     pngs = sorted(out.glob("slide-*.png"))
-    info = {"method": "cache", "error": ""}
+    info = {"method": (out / "method.txt").read_text() if (out / "method.txt").exists() else "cache", "error": ""}
     if not pngs:
         info = {"method": "", "error": ""}
+        errs = []
+        is_pdf = Path(path).suffix.lower() == ".pdf"
         try:
             pdf = path
-            if Path(path).suffix.lower() != ".pdf":
-                sbin = soffice_bin()
+            if not is_pdf:
+                sbin = None if os.environ.get("DN_NO_LIBREOFFICE") else soffice_bin()
                 if not sbin:
-                    raise RuntimeError("LibreOffice not installed (apt install libreoffice-impress)")
+                    raise RuntimeError("LibreOffice not installed")
                 with tempfile.TemporaryDirectory() as td:
                     prof = Path(td) / "profile"
                     src = Path(td) / ("deck" + Path(path).suffix.lower())
@@ -211,14 +240,23 @@ def render_slides(path: str, slides: List[Slide], dpi: int = 110) -> dict:
                         raise RuntimeError("LibreOffice conversion produced no PDF")
                     pdf = str(out / "deck.pdf")
                     shutil.copy(made, pdf)
-            if not shutil.which("pdftoppm"):
-                raise RuntimeError("pdftoppm not installed (apt install poppler-utils)")
-            subprocess.run(["pdftoppm", "-r", str(dpi), "-png", pdf, str(out / "slide")],
-                           capture_output=True, timeout=300, check=True)
-            pngs = sorted(out.glob("slide-*.png"))
-            info["method"] = "libreoffice+pdftoppm" if pdf != path else "pdftoppm"
+            m = _pdf_pages(pdf, out, dpi)
+            info["method"] = ("libreoffice+" + m) if not is_pdf else m
         except Exception as e:  # noqa
-            info["error"] = str(e)
+            errs.append(str(e))
+        pngs = sorted(out.glob("slide-*.png"))
+        if not pngs and not is_pdf:
+            try:
+                from .pptx_render import render_pptx
+                render_pptx(path, out)
+                info["method"] = "built-in pptx renderer"
+                errs = []                      # a real render: the LibreOffice absence is not an error
+            except Exception as e:  # noqa
+                errs.append(f"built-in renderer: {e}")
+            pngs = sorted(out.glob("slide-*.png"))
+        info["error"] = "; ".join(errs)
+        if pngs:
+            (out / "method.txt").write_text(info["method"])
     visible = [s for s in slides if not s.hidden]
     if pngs and len(pngs) in (len(slides), len(visible)):
         targets = slides if len(pngs) == len(slides) else visible

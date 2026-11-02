@@ -18,7 +18,7 @@ from core.llm import LENGTHS, PRESETS, TONES, LLMConfig, ai_status, answer_quest
 from core.overlap import overlap
 from core.session import PacedSession
 from core.stt import parse_command, transcribe
-from core.tts import ENGINES, edge_voice_list, synthesize
+from core.tts import ENGINES, edge_voice_list, synthesize, with_lead
 from core.video_summary import QUALITY, STYLES, make_video_summary
 
 ROOT = Path(__file__).resolve().parent
@@ -146,7 +146,7 @@ ISO, DECK_ISO = L["iso"], LANGUAGES[deck_lang]["iso"]
 
 # ------------------------------------------------------------------ helpers
 def load(path: str, name: str):
-    with st.spinner("Reading slides and rendering images (LibreOffice)…"):
+    with st.spinner("Reading slides and rendering slide images…"):
         slides = load_deck(path)
         info = render_slides(path, slides)
     ss.slides, ss.deck_path, ss.deck_name, ss.render_info = slides, path, name, info
@@ -204,7 +204,8 @@ def render_player():
     if not np_:
         return
     auto = np_["nonce"] != ss.played_nonce
-    st.audio(np_["path"], format="audio/mp3", autoplay=auto)
+    # slide first, voice after a short beat (silence lead-in; the slide image renders in the same pass)
+    st.audio(with_lead(np_["path"], 700) if auto else np_["path"], format="audio/mp3", autoplay=auto)
     ss.played_nonce = np_["nonce"]
     bits = [f"slide {np_['slide'] + 1}", f"{np_['seconds']:.0f}s audio", np_["voice"], np_["engine"],
             "cached" if np_.get("cached") else f"generated in {np_.get('prep_ms', 0) / 1000:.1f}s"]
@@ -396,24 +397,30 @@ with tab_present:
     if mode == "Video summary":
         render_video_summary()
     elif mode == "Auto walkthrough":
-        st.write("Plays every slide with its narration and advances automatically. Space = pause, ←/→ = move.")
-        gap = st.slider("Gap between slides (s)", 0.0, 3.0, 0.8, 0.1)
+        st.write("Shows each slide, then narrates it after a short beat, and advances automatically. Space = pause, ←/→ = move.")
+        g1, g2 = st.columns(2)
+        lead = g1.slider("Beat before narration (s)", 0.3, 2.0, 0.7, 0.1, help="How long each slide is on screen before its narration starts.")
+        gap = g2.slider("Gap between slides (s)", 0.0, 3.0, 0.8, 0.1)
+        if not ss.get("walk") and not external:
+            slide_image(0)
+            st.caption(f"Slide 1 of {N} · press Prepare & play to start the narrated walkthrough.")
         if st.button("🎬 Prepare & play walkthrough", type="primary"):
             bar = st.progress(0.0, "Generating narration…")
             aud = []
             for i in range(N):
                 aud.append(audio_for(i)["path"]); bar.progress((i + 1) / N, f"Slide {i + 1}/{N} ready")
-            ss.walk = {"audio": aud, "scripts": [spoken_script(i)[0] for i in range(N)], "gap": gap}
+            ss.walk = {"audio": aud, "scripts": [spoken_script(i)[0] for i in range(N)], "gap": gap, "lead": lead}
         if ss.get("walk"):
             w = ss.walk
-            html = player_html(slides, w["audio"], w["scripts"], gap_ms=int(w["gap"] * 1000), rtl=ISO in RTL)
+            html = player_html(slides, w["audio"], w["scripts"], gap_ms=int(w["gap"] * 1000), rtl=ISO in RTL,
+                               lead_ms=int(w.get("lead", lead) * 1000))
             html_frame(html, 760)
             d1, d2 = st.columns(2)
             d1.download_button("⬇️ Standalone HTML player", html.encode(), file_name="narrated_deck.html", mime="text/html")
             if d2.button("🎞️ Export narrated MP4"):
                 with st.spinner("Rendering video with ffmpeg…"):
                     out = str(ROOT / "data" / "narrated_deck.mp4")
-                    narrated_video(slides, w["audio"], out)
+                    narrated_video(slides, w["audio"], out, lead_s=w.get("lead", lead))
                 st.download_button("⬇️ Download MP4", Path(out).read_bytes(), file_name="narrated_deck.mp4", mime="video/mp4")
     else:
         paced = mode == "Presenter-paced"

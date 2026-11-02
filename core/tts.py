@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .languages import LANGUAGES, default_voice
-from .speech_text import chunks_for_pacing, speakable
+from .speech_text import chunks_for_pacing, pronounce, speakable
 
 CACHE = Path(__file__).resolve().parent.parent / "data" / "audio_cache"
 CACHE.mkdir(parents=True, exist_ok=True)
@@ -105,7 +105,7 @@ def synthesize(text: str, lang: str, voice: Optional[str] = None, rate_pct: int 
     keys = keys or {}
     L = LANGUAGES[lang]
     voice = voice or default_voice(lang)
-    clean = text if prepared else speakable(text, L["iso"])
+    clean = pronounce(text if prepared else speakable(text, L["iso"]), L["iso"])
     if not clean.strip():
         clean = "."
     sig = json.dumps([engine, voice, rate_pct, pitch_hz, sentence_pause_ms, para_pause_ms, clean], ensure_ascii=False)
@@ -220,3 +220,19 @@ def edge_voice_list() -> List[dict]:
         except Exception:
             _VOICES = []
     return _VOICES
+
+
+def with_lead(path: str, lead_ms: int = 700) -> str:
+    """Copy of an mp3 with `lead_ms` of silence in front, so the slide is on screen before the voice
+    starts even when the browser starts playback as soon as the page renders. Cached next to the file."""
+    if lead_ms <= 0:
+        return path
+    src = Path(path)
+    out = src.with_name(f"{src.stem}.lead{int(lead_ms)}.mp3")
+    if out.exists() and out.stat().st_size > 0:
+        return str(out)
+    try:
+        _ff(["-i", str(src), "-af", f"adelay={int(lead_ms)}:all=1", "-c:a", "libmp3lame", "-q:a", "3", str(out)])
+        return str(out)
+    except Exception:
+        return path
