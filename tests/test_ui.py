@@ -83,3 +83,12 @@ def test_video_summary_presenter_style():
     _btn(at, "🎞️ Generate video summary").click().run(timeout=600)
     assert not at.exception, at.exception
     assert at.session_state.vsum["style"] == "AI Presenter (robot)"
+
+
+def test_video_summary_default_is_animated_explainer():
+    os.environ.pop("LLM_API_KEY", None)
+    at = _loaded(AppTest.from_file(APP, default_timeout=600))
+    at.radio(key="top_mode").set_value("🎞️ Video summary").run(timeout=300)
+    assert at.selectbox(key="vs_style").value == "Animated Explainer"
+    assert at.toggle(key="vs_sfx").value is True
+    assert not any(r.key == "vs_pres" for r in at.radio)

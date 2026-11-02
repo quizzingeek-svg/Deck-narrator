@@ -120,14 +120,19 @@ def _glitch_layer(arr: np.ndarray, k: float, seed: int) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- robot (procedural, original design)
-def draw_robot(height_px: int, t: float, amp: float, blink: float, point: float, wave: float, ss: int = 2) -> np.ndarray:
-    """NOVA: a friendly hover robot. Returns an RGBA array about 0.76*height wide."""
+def draw_robot(height_px: int, t: float, amp: float, blink: float, point: float, wave: float, ss: int = 2,
+               legs: float | None = None, stride: float = 0.0, mood: str = "", aim: float | None = None) -> np.ndarray:
+    """NOVA: a friendly robot. Returns an RGBA array about 0.76*height wide.
+    legs=None -> hover base; legs=<phase> -> walking legs (stride 0 = standing, 1 = full walk cycle).
+    mood: "" | "happy" | "wow". aim: pointing direction of the right arm in radians (pi/2 = straight right)."""
     u = height_px / 100 * ss
-    Wb, Hb = int(78 * u), int(100 * u)
+    Wb, Hb = int((78 + (40 if aim is not None else 0)) * u), int(100 * u)   # extra room for a pointing arm
     im = Image.new("RGBA", (Wb, Hb), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     cx = Wb / 2
     bob = math.sin(t * 1.7) * 1.1
+    if legs is not None:
+        bob = math.sin(t * 1.7) * 0.4 - stride * 1.6 * abs(math.sin(legs))
     hb = bob + amp * 0.9 + math.sin(t * 3.3) * 0.3
     hx = math.sin(t * 0.8) * 0.7
 
@@ -140,11 +145,27 @@ def draw_robot(height_px: int, t: float, amp: float, blink: float, point: float,
     lw = max(1, int(0.7 * u))
     # thruster + hover base
     fl = 0.75 + 0.25 * math.sin(t * 23)
-    d.ellipse(R(-10, 91, 10, 95.5), fill=EYE[:3] + (int(150 * fl),))
-    d.ellipse(R(-6, 92, 6, 94.5), fill=(235, 255, 210, 255))
-    d.polygon([P(-15, 72), P(15, 72), P(11, 81), P(-11, 81)], fill=DARK)
-    d.ellipse(R(-14, 79, 14, 90), fill=BODY, outline=RIM, width=lw)
-    d.ellipse(R(-9, 82.5, 9, 86.5), outline=EYE, width=lw)
+    if legs is None:
+        d.ellipse(R(-10, 91, 10, 95.5), fill=EYE[:3] + (int(150 * fl),))
+        d.ellipse(R(-6, 92, 6, 94.5), fill=(235, 255, 210, 255))
+        d.polygon([P(-15, 72), P(15, 72), P(11, 81), P(-11, 81)], fill=DARK)
+        d.ellipse(R(-14, 79, 14, 90), fill=BODY, outline=RIM, width=lw)
+        d.ellipse(R(-9, 82.5, 9, 86.5), outline=EYE, width=lw)
+    else:   # walking legs: thigh + shin + boot, opposite phase per side
+        for side in (-1, 1):
+            ph = legs + (0 if side > 0 else math.pi)
+            a = stride * 0.42 * math.sin(ph)
+            kb = stride * 0.55 * max(0.0, math.sin(ph + math.pi / 2))
+            hx_, hy_ = P(7.5 * side, 71)
+            L = 11.5 * u
+            kx, ky = hx_ + L * math.sin(a), hy_ + L * math.cos(a)
+            fx_, fy_ = kx + L * math.sin(a - kb), ky + L * math.cos(a - kb)
+            fy_ = min(fy_, 96.5 * u)
+            d.line([(hx_, hy_), (kx, ky)], fill=BODY, width=int(6 * u))
+            d.line([(kx, ky), (fx_, fy_)], fill=BODY_HI, width=int(5 * u))
+            d.ellipse([kx - 3 * u, ky - 3 * u, kx + 3 * u, ky + 3 * u], fill=DARK, outline=RIM, width=lw)
+            d.rounded_rectangle([fx_ - 5 * u, fy_ - 2.2 * u, fx_ + 6 * u, fy_ + 2.4 * u], radius=int(2 * u), fill=DARK, outline=RIM, width=lw)
+            d.line([(fx_ - 3.5 * u, fy_ + 2.2 * u), (fx_ + 4.5 * u, fy_ + 2.2 * u)], fill=EYE, width=lw)
 
     # arms (back side first)
     def limb(side, a1, a2, glow=False):
@@ -172,7 +193,12 @@ def draw_robot(height_px: int, t: float, amp: float, blink: float, point: float,
     d.ellipse(R(-5.2, 48.8, 5.2, 59.2), outline=EYE[:3] + (int(120 + 135 * amp),), width=lw)
     # arms in front
     talk = min(1.0, amp * 1.5)
-    limb(+1, 0.28 + 1.75 * point + 0.06 * math.sin(t * 2.1), 0.65 + 1.55 * point + 0.12 * talk * math.sin(t * 4.3), glow=point > .5)
+    if aim is None:
+        limb(+1, 0.28 + 1.75 * point + 0.06 * math.sin(t * 2.1), 0.65 + 1.55 * point + 0.12 * talk * math.sin(t * 4.3), glow=point > .5)
+    else:
+        sw = 0.25 * stride * math.sin((legs or 0) + math.pi)
+        limb(+1, (0.28 + sw) * (1 - point) + aim * point + 0.06 * math.sin(t * 2.1),
+             (0.65 + sw) * (1 - point) + aim * point + 0.08 * talk * math.sin(t * 4.3), glow=point > .5)
     limb(-1, 0.22 + 2.25 * wave + 0.05 * talk * math.sin(t * 3.1),
          0.75 + 2.4 * wave + 0.35 * wave * math.sin(t * 10) + 0.25 * talk * math.sin(t * 4.7 + 1))
     # neck + head
@@ -185,9 +211,12 @@ def draw_robot(height_px: int, t: float, amp: float, blink: float, point: float,
     d.ellipse(R(-12, 9.6, 6, 13.2, hb, hx), fill=BODY_HI)
     d.rounded_rectangle(R(-14.5, 14, 14.5, 31, hb, hx), radius=int(6 * u), fill=(5, 9, 5), outline=(70, 105, 28), width=lw)
     lx = math.sin(t * 0.7) * 0.9 + 0.6 * point
-    eh = max(0.5, 5.6 * (1 - blink))
+    eh = max(0.5, (7.4 if mood == "wow" else 5.6) * (1 - blink))
     for ex in (-6.5, 6.5):
-        d.rounded_rectangle(R(ex - 3.3 + lx, 20.5 - eh / 2, ex + 3.3 + lx, 20.5 + eh / 2, hb, hx), radius=int(1.6 * u), fill=EYE)
+        if mood == "happy" and blink < 0.5:   # ^ ^ smiling eyes
+            d.arc(R(ex - 3.6 + lx, 18.2, ex + 3.6 + lx, 25.5, hb, hx), 200, 340, fill=EYE, width=int(1.5 * u))
+        else:
+            d.rounded_rectangle(R(ex - 3.3 + lx, 20.5 - eh / 2, ex + 3.3 + lx, 20.5 + eh / 2, hb, hx), radius=int(1.6 * u), fill=EYE)
     for i in range(9):
         shape = 1 - abs(i - 4) / 5
         h = 0.45 + amp * 3.0 * shape * (0.65 + 0.35 * math.sin(t * 23 + i * 1.7))

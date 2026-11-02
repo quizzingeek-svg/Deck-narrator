@@ -264,10 +264,11 @@ def slide_image(i: int, width="stretch"):
 
 
 def render_video_summary():
-    st.write("Generates a short futuristic **MP4 recap** of the deck: key points, headline numbers, slide visuals with "
-             "pan & zoom, HUD titles, and a voiceover in your narration language. No AI key needed.")
+    st.write("Generates a short animated **MP4 explainer** of the deck: key points, headline numbers and charts redrawn "
+             "from your slides, and a voiceover in your narration language. No AI key needed.")
     style = st.selectbox("Visual style", STYLES, index=0, key="vs_style",
-                         help="Holographic: cinematic 3D HUD with a tilted holo-panel. AI Presenter: NOVA, a robot host, "
+                         help="Animated Explainer (default): flat cartoon infographic scenes rebuilt from your deck's real numbers, charts, "
+                              "tables and countries, with a beat per sentence. Holographic: cinematic 3D HUD with a tilted holo-panel. AI Presenter: NOVA, a robot host, "
                               "narrates beside a big holo-screen showing your slides. Classic: the simpler HUD look.")
     photo_up, pname = None, ""
     if style.startswith("AI"):
@@ -280,6 +281,9 @@ def render_video_summary():
                           "it is never stored on the server or sent anywhere. Only upload a photo you have the right to use.")
         pname = pc[2].text_input("Presenter name (optional)", key="vs_name", max_chars=28,
                                  placeholder="NOVA" if not photo_up else "e.g. Mohit")
+    sfx = True
+    if style.startswith("Animated"):
+        sfx = st.toggle("🔊 Subtle sound effects (whooshes and ticks, mixed low under the voice)", value=True, key="vs_sfx")
     c = st.columns([1.2, 1, 1.4])
     quality = c[0].selectbox("Quality", list(QUALITY), index=0, key="vs_quality",
                              help="Fast (540p) renders about 2x quicker, which is best on Streamlit Cloud. HD (720p) looks sharper.")
@@ -305,7 +309,7 @@ def render_video_summary():
         try:
             r = make_video_summary(slides, str(out), deck_name=ss.deck_name, cfg=cfg if cfg.ready else None, lang=lang,
                                    voice=voice or None, rate=rate, pitch=pitch, engine=engine, keys=keys, quality=quality, k=k, style=style,
-                                   photo=photo_path, presenter_name=pname,
+                                   photo=photo_path, presenter_name=pname, sfx=sfx,
                                    translate_fn=tr, progress=lambda f, m: bar.progress(min(1.0, f), m))
             ss.vsum = r
         except Exception as e:

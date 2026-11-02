@@ -540,12 +540,51 @@ class Renderer:
 
 
 # --------------------------------------------------------------------------- pipeline
-STYLES = ["Holographic (cinematic)", "AI Presenter (robot)", "Classic HUD"]
+def _hook(slides: List[Slide]) -> dict:
+    """Intro hook: the first headline number printed in the deck (after the title slide), with its own line."""
+    from .explainer import kpis
+    for sl in list(slides[1:]) + list(slides[:1]):
+        for st in kpis(sl, 3):
+            if re.search(r"[%$€£₹]|[MBKT]\b|bn|million|billion|crore|lakh", st["value"] + " " + st["label"]):
+                return st
+    return {}
+
+
+def make_sfx(events, total_s: float, path: str, sr: int = 44100, gain: float = 0.16):
+    """Synthesised, quiet sound design: soft whooshes on scene cuts, light ticks/pops on reveals. Mono 16-bit WAV."""
+    import wave
+    n = int(total_s * sr) + sr
+    out = np.zeros(n, np.float32)
+    rng = np.random.default_rng(3)
+    for t, kind in events:
+        i = int(max(0.0, t) * sr)
+        if kind == "whoosh":
+            L = int(0.45 * sr)
+            x = rng.standard_normal(L).astype(np.float32)
+            x = np.convolve(x, np.ones(24, np.float32) / 24, mode="same")
+            env = np.sin(np.linspace(0, np.pi, L)) ** 2
+            y = x * env * 0.9
+        else:
+            L = int(0.09 * sr)
+            tt = np.arange(L) / sr
+            f0 = 1400 if kind == "tick" else 620
+            y = np.sin(2 * np.pi * f0 * tt * (1 + (0.6 if kind == "pop" else 0) * tt * 10)) * np.exp(-tt * (60 if kind == "tick" else 35)) * 0.6
+        j = min(n, i + len(y))
+        out[i:j] += y[: j - i]
+    out = np.clip(out * gain, -1, 1)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+        w.writeframes((out * 32767).astype(np.int16).tobytes())
+    return path
+
+
+STYLES = ["Animated Explainer", "Holographic (cinematic)", "AI Presenter (robot)", "Classic HUD"]
 
 
 def render_video(slides: List[Slide], segs: List[Segment], out_path: str, quality: str = "Fast (540p)",
                  lang_label: str = "", deck_title: str = "", style: str = STYLES[0],
-                 photo: Optional[str] = None, presenter_name: str = "", progress: Optional[Callable[[float, str], None]] = None) -> dict:
+                 photo: Optional[str] = None, presenter_name: str = "", progress: Optional[Callable[[float, str], None]] = None,
+                 sfx: bool = True) -> dict:
     """Segments must have .audio set. Writes an MP4 (H.264 + AAC). Returns stats."""
     W, H, fps = QUALITY[quality]
     ff = ffmpeg_bin()
@@ -566,11 +605,16 @@ def render_video(slides: List[Slide], segs: List[Segment], out_path: str, qualit
         subprocess.run(args + ["-filter_complex", fc, "-map", "[out]", "-c:a", "aac", "-b:a", "128k", str(audio)],
                        check=True, capture_output=True, timeout=300)
         total_frames = sum(int(round(sg.seconds * fps)) or 1 for sg in segs)
+        mix_sfx = sfx and style.startswith("Animated")
+        enc_out = str(work / "video_only.mp4") if mix_sfx else out_path
         proc = subprocess.Popen([ff, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
                                  "-r", str(fps), "-i", "-", "-i", str(audio), "-c:v", "libx264", "-preset", "veryfast",
                                  "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest", "-movflags", "+faststart",
-                                 out_path], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        if style.startswith("Classic"):
+                                 enc_out], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        if style.startswith("Animated"):
+            from .explainer import ExplainerRenderer
+            r = ExplainerRenderer(W, H, fps, deck_title or _deck_title(slides), lang_label, hook=_hook(slides))
+        elif style.startswith("Classic"):
             r = Renderer(W, H, fps, deck_title or _deck_title(slides), lang_label)
         else:
             from .video_fx import HoloRenderer
@@ -591,6 +635,12 @@ def render_video(slides: List[Slide], segs: List[Segment], out_path: str, qualit
         if proc.wait() != 0:
             raise RuntimeError(f"ffmpeg failed: {err[-400:]}")
         dur = sum(sg.seconds for sg in segs)
+        if mix_sfx:   # quiet synthesised whooshes/ticks mixed under the voice
+            fx = make_sfx(getattr(r, "events", []), dur, str(work / "sfx.wav"))
+            subprocess.run([ff, "-y", "-loglevel", "error", "-i", enc_out, "-i", fx, "-filter_complex",
+                            "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0,volume=2[a]", "-map", "0:v", "-map", "[a]",
+                            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_path],
+                           check=True, capture_output=True, timeout=600)
         return {"seconds": round(dur, 1), "frames": done, "render_s": round(time.time() - t0, 1), "size": f"{W}x{H}@{fps}", "style": style,
                 "path": out_path}
     finally:
@@ -600,7 +650,7 @@ def render_video(slides: List[Slide], segs: List[Segment], out_path: str, qualit
 def make_video_summary(slides: List[Slide], out_path: str, *, deck_name: str = "", cfg=None, lang: str = "English (US)",
                        voice: Optional[str] = None, rate: int = 0, pitch: int = 0, engine: Optional[str] = None,
                        keys: Optional[dict] = None, quality: str = "Fast (540p)", k: int = 6, translate_fn=None, style: str = STYLES[0],
-                       photo: Optional[str] = None, presenter_name: str = "",
+                       photo: Optional[str] = None, presenter_name: str = "", sfx: bool = True,
                        progress: Optional[Callable[[float, str], None]] = None) -> dict:
     """Full pipeline: script -> (translate) -> voice -> frames -> MP4. progress(fraction, text)."""
     from .tts import ENGINES, synthesize
@@ -627,7 +677,7 @@ def make_video_summary(slides: List[Slide], out_path: str, *, deck_name: str = "
                 notes.append(a["warning"])
             prog(0.05 + 0.2 * (j + 1) / len(segs), f"Voiceover {j + 1}/{len(segs)} ready")
     t_audio = time.time() - t0
-    st = render_video(slides, segs, out_path, quality, lang, _deck_title(slides, deck_name), style=style, photo=photo, presenter_name=presenter_name,
+    st = render_video(slides, segs, out_path, quality, lang, _deck_title(slides, deck_name), style=style, photo=photo, presenter_name=presenter_name, sfx=sfx,
                       progress=lambda f, m: prog(0.25 + 0.75 * f, m))
     prog(1.0, "Done")
     st.update(script=script_text(segs), source=source, notes=sorted(set(notes)), total_s=round(time.time() - t0, 1),

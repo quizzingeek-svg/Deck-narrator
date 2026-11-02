@@ -51,7 +51,7 @@ def test_fx_envelope_and_robot():
     import numpy as np
     from core.video_fx import draw_robot, envelope
     from core.video_summary import STYLES
-    assert len(STYLES) == 3 and STYLES[1].startswith("AI")
+    assert len(STYLES) == 4 and STYLES[0] == "Animated Explainer" and STYLES[2].startswith("AI") and "NOVA" not in STYLES[0]
     r = draw_robot(300, 1.0, 0.8, False, 1.0, 0.0)
     assert r.ndim == 3 and r.shape[2] == 4 and r.shape[0] >= 250 and r[..., 3].max() == 255
     a = draw_robot(300, 1.0, 0.0, True, 0.0, 0.0)
@@ -72,7 +72,7 @@ def _probe(path):
 def test_render_each_cinematic_style():
     from core.video_summary import STYLES
     slides = load_deck(SAMPLE)
-    for st_ in STYLES[:2]:
+    for st_ in STYLES[1:3]:
         out = ROOT / "data" / "test_out" / f"t_style_{st_[:4]}.mp4"
         r = make_video_summary(slides, str(out), deck_name="sample_deck.pptx", k=2, style=st_)
         info = _probe(str(out))
@@ -106,3 +106,73 @@ def test_photo_presenter_render(tmp_path):
     r = make_video_summary(load_deck(SAMPLE), str(out), deck_name="sample_deck.pptx", k=2, style="AI Presenter (robot)",
                            photo=str(photo), presenter_name="Test Host")
     assert "h264" in _probe(str(out)) and r["seconds"] > 20
+
+
+def _all_text(sl):
+    import json
+    return json.dumps([sl.title, sl.bullets, getattr(sl, "tables", None), getattr(sl, "charts", None)], ensure_ascii=False, default=str)
+
+
+def test_explainer_plans_use_only_deck_values():
+    from core.deck import load_deck
+    from core.explainer import plan_scene
+    sl = load_deck("samples/test_explainer_deck.pptx")
+    kinds = [plan_scene(s, "", "Brazil Market Entry Review")["kind"] for s in sl]
+    assert kinds[1:] == ["country", "compare", "line", "versus", "cards"]
+    for s in sl:
+        pl = plan_scene(s, "", "Brazil Market Entry Review")
+        src = _all_text(s)
+        for st_ in pl.get("stats", []):
+            assert st_["value"].rstrip("+") in src
+        for ser in pl.get("series", []):
+            for t in ser["text"]:
+                assert t in src
+
+
+def test_find_countries_prefers_deck_subject():
+    from core.deck import load_deck
+    from core.explainer import find_countries, plan_scene
+    assert find_countries("Entering India's market") == ["India"]
+    s = load_deck("samples/sample_deck.pptx")[1]
+    pl = plan_scene(s, "", "Entering India's diagnostic imaging market")
+    assert pl["kind"] == "country" and pl["countries"][0] == "India"
+
+
+def test_walking_robot_shape():
+    from core.video_fx import draw_robot
+    a = draw_robot(200, 0.0, 0.3, 0.0, 1.0, 0.0, legs=1.0, stride=1.0, aim=1.57)
+    b = draw_robot(200, 0.0, 0.3, 0.0, 0.0, 0.0)
+    assert a.ndim == 3 and a.shape[2] == 4 and a.shape[1] > b.shape[1] and a[..., 3].max() > 0
+
+
+def test_explainer_render_short(tmp_path):
+    import subprocess
+    from core.deck import load_deck
+    from core.video_summary import make_video_summary
+    out = str(tmp_path / "ex.mp4")
+    sl = load_deck("samples/test_explainer_deck.pptx")
+    make_video_summary(sl, out, deck_name="t", style="Animated Explainer", k=2)
+    pr = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0", out], capture_output=True, text=True).stdout
+    assert "h264" in pr and "aac" in pr
+
+
+def test_stats_paired_with_own_line():
+    from core.deck import load_deck
+    from core.explainer import kpis
+    for path in ("samples/sample_deck.pptx", "samples/test_explainer_deck.pptx"):
+        for sl in load_deck(path):
+            for st_ in kpis(sl, 3):
+                assert st_["value"].lstrip("~").rstrip("+") in st_["label"]
+                assert st_["label"] in [sl.title] + list(sl.bullets)
+
+
+def test_country_primary_first_and_sfx(tmp_path):
+    import wave
+    from core.deck import load_deck
+    from core.explainer import plan_scene
+    from core.video_summary import make_sfx
+    pl = plan_scene(load_deck("samples/sample_deck.pptx")[1], "", "Entering India's diagnostic imaging market")
+    assert pl["countries"][0] == "India"
+    p = make_sfx([(0.0, "whoosh"), (0.5, "tick"), (1.0, "pop")], 2.0, str(tmp_path / "s.wav"))
+    with wave.open(p) as w:
+        assert w.getnframes() > 44100 * 2
