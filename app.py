@@ -169,7 +169,7 @@ def spoken_script(i: int) -> tuple[str, str]:
         r = translate(base, lang, ISO, cfg if cfg.ready else None, L["locale"])
         ss.tr_cache[k] = (r["text"], f"translated via {r['engine']}")
     except Exception as e:
-        ss.tr_cache[k] = (base, f"⚠️ {e} Narrating the original text.")
+        return base, f"⚠️ {e} Narrating the original text."   # not cached: retried next time
     return ss.tr_cache[k]
 
 

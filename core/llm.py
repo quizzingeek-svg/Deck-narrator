@@ -251,54 +251,133 @@ def translate(text: str, target_lang_name: str, target_iso: str, cfg: Optional[L
         except Exception:
             pass
         return res
-    global _FREE_DOWN_UNTIL
+    global _FREE_DOWN_UNTIL, _FREE_FAILS
     if time.time() < _FREE_DOWN_UNTIL:
-        raise RuntimeError("Free translation was unreachable a moment ago (skipping for 10 min). "
-                           "Add an LLM key (Gemini free tier) for translation.")
+        raise RuntimeError("Free translation is briefly unavailable (all free services failed several times; "
+                           "retrying in about a minute). Add an LLM key (Gemini free tier) for guaranteed translation.")
     errs = []
+    try:
+        res = free_translate(text, target_iso, errs)
+    except Exception as e:  # noqa
+        res = None; errs.append(f"{type(e).__name__}: {e}")
+    if res:
+        _FREE_FAILS = 0
+        return _save(res)
+    _FREE_FAILS += 1
+    if _FREE_FAILS >= 3:          # short cooldown only after repeated full failures
+        _FREE_DOWN_UNTIL = time.time() + 60
+        _FREE_FAILS = 0
+    raise RuntimeError("Free translation unavailable (" + "; ".join(errs[-4:]) + "). Add an LLM key (Gemini free tier) for translation.")
 
-    def google():
-        from deep_translator import GoogleTranslator
-        code = {"zh": "zh-CN", "he": "iw"}.get(target_iso, target_iso)
-        out = [GoogleTranslator(source="auto", target=code).translate(p) if p.strip() else "" for p in text.split("\n")]
-        return {"text": "\n".join(x or "" for x in out), "engine": "Google Translate (free, deep-translator)"}
 
-    def mymemory():
-        # direct MyMemory REST API (free, no key); split into <450-char chunks so long scripts aren't cut off
-        import re
-        import requests
-        tgt = {"zh": "zh-CN", "he": "he-IL"}.get(target_iso, target_iso)
-        out_paras = []
-        for para in text.split("\n"):
-            if not para.strip():
-                out_paras.append(""); continue
-            chunks, cur = [], ""
-            for sent in re.split(r"(?<=[.!?])\s+", para):
-                if len(cur) + len(sent) + 1 > 450 and cur:
-                    chunks.append(cur); cur = sent
-                else:
-                    cur = (cur + " " + sent).strip()
-            if cur:
-                chunks.append(cur)
-            done = []
-            for c in chunks:
-                r = requests.get("https://api.mymemory.translated.net/get",
-                                 params={"q": c[:480], "langpair": f"en|{tgt}"}, timeout=10)
-                r.raise_for_status()
-                j = r.json()
-                if str(j.get("responseStatus")) != "200":
-                    raise RuntimeError(j.get("responseDetails", "MyMemory error"))
-                done.append(j["responseData"]["translatedText"])
-            out_paras.append(" ".join(done))
-        return {"text": "\n".join(out_paras), "engine": "MyMemory (free)"}
+_FREE_FAILS = 0
+_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"}
 
-    for name, fn in (("Google", google), ("MyMemory", mymemory)):
-        ok, val = _run_with_timeout(fn, 40)
-        if ok:
-            return _save(val)
-        errs.append(f"{name}: {val}")
-    _FREE_DOWN_UNTIL = time.time() + 600
-    raise RuntimeError("Free translation unavailable (" + "; ".join(errs) + "). Add an LLM key (Gemini free tier) for translation.")
+
+def _chunks(text: str, limit: int):
+    """Split into paragraphs, then sentence-packed chunks <= limit chars. Yields (para_index, chunk)."""
+    out = []
+    for pi, para in enumerate(text.split("\n")):
+        if not para.strip():
+            out.append((pi, "")); continue
+        cur = ""
+        for sent in re.split(r"(?<=[.!?।])\s+", para.strip()):
+            while len(sent) > limit:                       # very long sentence: hard split on spaces
+                cut = sent.rfind(" ", 0, limit) or limit
+                if cur: out.append((pi, cur)); cur = ""
+                out.append((pi, sent[:cut])); sent = sent[cut:].strip()
+            if cur and len(cur) + len(sent) + 1 > limit:
+                out.append((pi, cur)); cur = sent
+            else:
+                cur = (cur + " " + sent).strip()
+        if cur:
+            out.append((pi, cur))
+    return out
+
+
+def _join(text: str, parts):
+    paras = [[] for _ in text.split("\n")]
+    for pi, t in parts:
+        if t:
+            paras[pi].append(t)
+    return "\n".join(" ".join(p) for p in paras)
+
+
+def _gtx(chunk: str, iso: str) -> str:
+    import requests
+    code = {"zh": "zh-CN", "he": "iw"}.get(iso, iso)
+    r = requests.get("https://translate.googleapis.com/translate_a/single",
+                     params={"client": "gtx", "sl": "auto", "tl": code, "dt": "t", "q": chunk},
+                     headers=_UA, timeout=12)
+    r.raise_for_status()
+    j = r.json()
+    out = "".join(seg[0] for seg in j[0] if seg and seg[0])
+    if not out.strip():
+        raise RuntimeError("empty gtx result")
+    return out
+
+
+def _deep_google(chunk: str, iso: str) -> str:
+    from deep_translator import GoogleTranslator
+    code = {"zh": "zh-CN", "he": "iw"}.get(iso, iso)
+    out = GoogleTranslator(source="auto", target=code).translate(chunk)
+    if not out or not out.strip():
+        raise RuntimeError("empty Google result")
+    return out
+
+
+def _mymemory(chunk: str, iso: str) -> str:
+    import requests
+    tgt = {"zh": "zh-CN", "he": "he-IL"}.get(iso, iso)
+    r = requests.get("https://api.mymemory.translated.net/get",
+                     params={"q": chunk[:480], "langpair": f"en|{tgt}", "de": "decknarrator@example.com"},
+                     headers=_UA, timeout=12)
+    r.raise_for_status()
+    j = r.json()
+    if str(j.get("responseStatus")) != "200":
+        raise RuntimeError(str(j.get("responseDetails", "MyMemory error"))[:80])
+    out = j["responseData"]["translatedText"]
+    if "MYMEMORY WARNING" in out.upper():
+        raise RuntimeError("MyMemory quota")
+    return out
+
+
+_BACKENDS = (("Google gtx", _gtx, 1800), ("Google (deep-translator)", _deep_google, 1800), ("MyMemory", _mymemory, 450))
+
+
+def free_translate(text: str, iso: str, errs: Optional[list] = None, retries: int = 2) -> Optional[Dict]:
+    """Keyless translation: tries each free backend in order, chunked, with retry + backoff per chunk.
+    A chunk that fails on one backend falls through to the next, so one blip never kills the whole job."""
+    errs = errs if errs is not None else []
+    parts, engines = [], set()
+    cache = {}
+    for pi, chunk in _chunks(text, 1800):
+        if not chunk:
+            parts.append((pi, "")); continue
+        done = None
+        for name, fn, lim in _BACKENDS:
+            sub = [c for _, c in _chunks(chunk, lim) if c]
+            try:
+                outs = []
+                for c in sub:
+                    if (name, c) in cache:
+                        outs.append(cache[(name, c)]); continue
+                    for att in range(retries + 1):
+                        ok, val = _run_with_timeout(lambda: fn(c, iso), 15)
+                        if ok:
+                            break
+                        if att < retries:
+                            time.sleep(0.6 * (2 ** att))
+                    if not ok:
+                        raise RuntimeError(val)
+                    cache[(name, c)] = val; outs.append(val)
+                done = " ".join(outs); engines.add(name); break
+            except Exception as e:  # noqa
+                errs.append(f"{name}: {e}")
+        if done is None:
+            return None
+        parts.append((pi, done))
+    return {"text": _join(text, parts), "engine": "free translation (" + ", ".join(sorted(engines)) + ")"}
 
 
 def _run_with_timeout(fn, seconds: float):
@@ -311,7 +390,7 @@ def _run_with_timeout(fn, seconds: float):
         try:
             q.put((True, fn()))
         except Exception as e:  # noqa
-            q.put((False, type(e).__name__))
+            q.put((False, f"{type(e).__name__}: {str(e)[:80]}"))
     threading.Thread(target=wrap, daemon=True).start()
     try:
         return q.get(timeout=seconds)
