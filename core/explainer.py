@@ -19,6 +19,7 @@ from typing import List, Optional
 import numpy as np
 from PIL import Image, ImageDraw
 
+from .sectors import SECTORS, draw_icon as sector_icon, icon_for_sentence, backdrop_layers, rig, transition, render_icon
 from .flat_art import art_for, back_out, draw_art, mood_for, person, squash
 from .video_fx import EYE, HoloRenderer, _glitch_layer, bloom, envelope, glitch
 from .video_summary import GREEN, STAT_RE, Segment, _count_up, _ease, _rgba_over, _wrap, font
@@ -234,12 +235,34 @@ def _fmt(v: float) -> str:
 
 
 # --------------------------------------------------------------------------- renderer
+class FadeDraw(ImageDraw.ImageDraw):
+    """PIL ignores the alpha of text drawn onto an RGB frame, so fades popped in. This blends translucent text
+    toward the dark backdrop instead (and skips fully transparent text)."""
+    BG = (16, 20, 15)
+
+    def __init__(self, im):
+        super().__init__(im, "RGBA")
+
+    def text(self, xy, text, fill=None, *a, **k):
+        if isinstance(fill, tuple) and len(fill) == 4 and fill[3] < 255:
+            al = fill[3] / 255
+            if al <= 0.02:
+                return
+            fill = tuple(int(c * al + b * (1 - al)) for c, b in zip(fill[:3], self.BG))
+        return super().text(xy, text, fill, *a, **k)
+
+
 class ExplainerRenderer(HoloRenderer):
     """Character-free animated explainer. A light beam/cursor points at the item being narrated."""
 
-    def __init__(self, W, H, fps, deck_title: str, lang_label: str = "", hook: Optional[dict] = None, seed: int = 11):
+    def __init__(self, W, H, fps, deck_title: str, lang_label: str = "", hook: Optional[dict] = None, seed: int = 11,
+                 sector: str = "General"):
         super().__init__(W, H, fps, deck_title, lang_label, presenter=False, seed=seed)
         self.hook = hook or {}
+        self.sector = sector if sector in SECTORS else "General"
+        self.sec = SECTORS[self.sector]
+        self.ss = 2 if H <= 720 else 1.5      # supersampling factor for character/illustration layers
+        self._layers = None
         self.events: List[tuple] = []          # (time_s, kind) for the optional sound design
         self.f_lab = font(self.s(17))
         self.f_val = font(self.s(20), True)
@@ -256,91 +279,199 @@ class ExplainerRenderer(HoloRenderer):
         n = max(1, int(round(seg.seconds * self.fps)))
         env = envelope(seg.audio, self.fps, n) if seg.audio else np.zeros(n, np.float32)
         self.events.append((self.T, "whoosh"))
+        self.events.append((self.T + 0.05, self.sec["sfx"]))
         if seg.kind == "point":
             gen = self._scene(seg, slides[seg.slide], idx, total, n, env)
         elif seg.kind == "intro":
             gen = self._intro(seg, idx, total, n, env)
         else:
-            gen = self._card(seg, idx, total, n, env)
+            gen = self._outro(seg, idx, total, n, env)
         for img in gen:
             yield img
         self.T += n / self.fps
 
     def _intro(self, seg: Segment, idx, total, n, env):
-        """Kinetic-typography hook: the deck title word by word, then its key number counting up (from the deck)."""
+        """Cold open (first ~5 s): the deck's most striking real number slams in over sector art, then the title."""
         W, H, s, fps = self.W, self.H, self.s, self.fps
+        hv, hl = self.hook.get("value"), self.hook.get("label", "")
         words = (seg.headline or self.title or "").split()[:14]
-        fT = font(s(50), True)
+        fT = font(s(46), True)
         lines, cur = [], []
         for w in words:
-            if cur and fT.getlength(" ".join(cur + [w])) > W * 0.8:
+            if cur and fT.getlength(" ".join(cur + [w])) > W * 0.66:
                 lines.append(cur); cur = []
             cur.append(w)
         if cur:
             lines.append(cur)
         lines = lines[:2]
-        lh = s(64)
-        hv, hl = self.hook.get("value"), self.hook.get("label", "")
-        top = H * (0.3 if hv else 0.4) - lh * len(lines) / 2
-        f_hl = font(s(20))
-        hlines = _wrap(hl, f_hl, int(W * 0.7), 2) if hv else []
+        f_hl = font(s(22))
+        hlines = _wrap(hl, f_hl, int(W * 0.74), 2) if hv else []
+        fbig = font(s(120), True)
+        icons = self.sec["icons"][:3]
+        T_TITLE = 3.4 if hv else 0.4          # number owns the first ~3.4 s, then the title takes over
+        icon_imgs = {}
+        tag = (self.sector if self.sector != "General" else "BRIEFING").upper()
         for f in range(n):
             t = f / fps
             tt = self.T + t
-            img = (self.background(tt) * _ease(t / 0.8)).astype(np.uint8)
-            self.particles(img, tt, near=False)
+            img = self.background(tt, -W * 0.1 * _ease(t / 4))
             pil = Image.fromarray(img)
-            d = ImageDraw.Draw(pil, "RGBA")
-            self.frame_hud(d, "INIT", idx, total, t)
+            d = FadeDraw(pil)
+            self.frame_hud(d, "OPEN", idx, total, t)
+            mv = _ease((t - T_TITLE) / 0.6)    # 0 = hook centre stage, 1 = hook docked above title
+            if hv:
+                q = _ease((t - 0.15) / 0.9)
+                if q > 0 and not self._hook_ev:
+                    self.events.append((tt + 0.1, "tick")); self.events.append((tt + 0.95, "slam")); self._hook_ev = True
+                sxq, syq = squash(min(1, max(0, (t - 1.0) / 0.3)))
+                yb = H * (0.34 - 0.19 * mv)
+                fb = fbig if mv < 0.5 else font(s(70), True)
+                val = _count_up(hv, q) if q < 1 else hv
+                d.text((W * (0.5 - 0.08 * mv), yb + s(30) * (1 - back_out(min(1, q * 1.2)))), val, font=fb, fill=EYE + (int(255 * min(1, q * 2)),), anchor="mm")
+                if 0.95 < t < 1.4:      # impact ring
+                    r = s(60) + s(500) * (t - 0.95)
+                    d.ellipse([W / 2 - r, yb - r * 0.5, W / 2 + r, yb + r * 0.5], outline=GREEN + (int(220 * (1.4 - t) / 0.45),), width=s(4))
+                la = _ease((t - 1.1) / 0.4) * (1 - mv)
+                if la > 0:
+                    for j, ln_ in enumerate(hlines):
+                        d.text((W / 2, H * 0.47 + j * s(30)), ln_, font=f_hl, fill=(230, 236, 226, int(255 * la)), anchor="ma")
+                    d.text((W / 2, H * 0.19), "COLD OPEN  //  " + tag, font=self.f_hud, fill=GREEN + (int(255 * la),), anchor="ma")
+                # sector icons pop around the number
+                for k, kind in enumerate(icons):
+                    pk = (t - 1.25 - 0.18 * k) / 0.45
+                    if pk > 0 and mv < 1:
+                        sz = int(H * 0.27)
+                        key = (kind, int(t * 8) % 8)
+                        if key not in icon_imgs:
+                            icon_imgs[key] = render_icon(kind, sz, t, 2)
+                        ic = icon_imgs[key]
+                        sc = back_out(min(1, pk)) * (1 - mv)
+                        if sc > 0.05:
+                            ic2 = ic.resize((max(1, int(ic.width * sc)), max(1, int(ic.height * sc))))
+                            cx = W * (0.18 + 0.32 * k)
+                            pil.paste(ic2, (int(cx - ic2.width / 2), int(H * 0.79 - ic2.height)), ic2)
+            # title kinetic type
+            top = H * (0.42 if hv else 0.36)
+            lh = s(58)
             k = 0
-            for li, ln in enumerate(lines):
-                widths = [fT.getlength(w + " ") for w in ln]
-                x = W / 2 - sum(widths) / 2
-                for w, wd in zip(ln, widths):
-                    q = _ease((t - 0.4 - 0.12 * k) / 0.45)
-                    if q > 0:
-                        y = top + li * lh + s(36) * (1 - q)
-                        col = (255, 255, 255, int(255 * q)) if not any(c.isdigit() for c in w) else EYE + (int(255 * q),)
+            for li, ln_ in enumerate(lines):
+                widths = [fT.getlength(w + " ") for w in ln_]
+                x = W * 0.42 - sum(widths) / 2
+                for w, wd in zip(ln_, widths):
+                    qq = _ease((t - T_TITLE - 0.1 * k) / 0.4)
+                    if qq > 0:
+                        y = top + li * lh + s(30) * (1 - qq)
+                        col = (255, 255, 255, int(255 * qq)) if not any(c.isdigit() for c in w) else EYE + (int(255 * qq),)
                         d.text((x, y), w, font=fT, fill=col)
                     x += wd
                     k += 1
-            t_line = 0.5 + 0.12 * k
-            lw = W * 0.5 * _ease((t - t_line) / 0.6)
+            t_line = T_TITLE + 0.3 + 0.1 * k
+            lw = W * 0.5 * _ease((t - t_line) / 0.5)
             yl = top + lh * len(lines) + s(14)
             if lw > 1:
-                d.line([(W / 2 - lw / 2, yl), (W / 2 + lw / 2, yl)], fill=GREEN, width=s(3))
-            if hv:
-                qs = _ease((t - t_line - 0.1) / 0.4)
-                if qs > 0:
-                    d.text((W / 2, yl + s(8)), "SPOILER: IT ALL COMES DOWN TO ONE NUMBER", font=self.f_hud, fill=GREEN + (int(255 * qs),), anchor="ma")
-                q = _ease((t - t_line - 0.6) / 1.4)
-                if q > 0:
-                    if q < 1 and not self._hook_ev:
-                        self.events.append((tt, "tick")); self._hook_ev = True
-                    fbig = font(s(92), True)
-                    d.text((W / 2, yl + s(30) + s(20) * (1 - back_out(q * 2))), _count_up(hv, q) if q < 1 else hv, font=fbig,
-                           fill=EYE + (int(255 * min(1, q * 2)),), anchor="ma")
-                    for j, ln in enumerate(hlines):
-                        d.text((W / 2, yl + s(140) + j * s(26)), ln, font=f_hl, fill=PALE + (int(255 * min(1, q * 2)),), anchor="ma")
-            sub = "AI VIDEO BRIEFING  //  " + (self.lang or "").upper()
-            d.text((W / 2, H * 0.86), sub, font=self.f_hud, fill=GREEN + (int(255 * _ease((t - 1.2) / 0.6)),), anchor="ma")
-            img = np.asarray(pil).copy()
-            self._sweep(img, t, 1.0)
-            yield img
+                d.line([(W * 0.42 - lw / 2, yl), (W * 0.42 + lw / 2, yl)], fill=GREEN, width=s(3))
+            sub = tag + " EXPLAINER  //  " + (self.lang or "").upper()
+            if t > t_line:
+                d.text((W * 0.42, yl + s(22)), sub, font=self.f_hud, fill=GREEN + (int(255 * _ease((t - t_line) / 0.5)),), anchor="ma")
+            if t > T_TITLE:
+                lay_w = int(H * 0.5)
+                X = W * (0.86 - 0.0)
+                lay = Image.new("RGBA", (int(lay_w * self.ss), int(lay_w * self.ss)), (0, 0, 0, 0))
+                rig(ImageDraw.Draw(lay, "RGBA"), lay.width / 2, lay.height * 0.95, lay.height * 0.8, t, self.sector, "happy", "wave",
+                    0, face=-1)
+                lay = lay.resize((lay_w, lay_w), Image.LANCZOS)
+                dy = int(H * 0.3 * (1 - back_out(min(1, (t - T_TITLE) / 0.6))))
+                pil.paste(lay, (int(X - lay_w / 2), int(H * 0.8 - lay_w + dy)), lay)
+            if t < 0.15:
+                d.rectangle([0, 0, W, H], fill=(0, 0, 0, int(255 * (1 - t / 0.15))))
+            yield np.asarray(pil)
         self._hook_ev = False
+
+    def _outro(self, seg: Segment, idx, total, n, env):
+        """Sector-themed end card: 'the bottom line' with the key slides as icon cards and the presenter waving off."""
+        W, H, s, fps = self.W, self.H, self.s, self.fps
+        pts = [p for p in seg.extra.get("points", []) if p][:4]
+        f_t = font(s(44), True)
+        f_p = font(s(20), True)
+        tag = (self.sector if self.sector != "General" else "BRIEFING").upper()
+        cw = W * 0.165
+        gap = W * 0.02
+        tw = len(pts) * cw + (len(pts) - 1) * gap if pts else 0
+        icons = {}
+        for f in range(n):
+            t = f / fps
+            tt = self.T + t
+            img = self.background(tt, W * 0.1 * _ease(t / 3))
+            pil = Image.fromarray(img)
+            d = FadeDraw(pil)
+            self.frame_hud(d, "END", idx, total, t)
+            q = _ease(t / 0.5)
+            d.text((W * 0.06, H * 0.1 + s(20) * (1 - q)), "THE BOTTOM LINE", font=f_t, fill=(255, 255, 255, int(255 * q)))
+            d.line([(W * 0.06, H * 0.1 + s(56)), (W * 0.06 + s(200) * q, H * 0.1 + s(56))], fill=GREEN, width=s(4))
+            x = W * 0.06
+            for k, ptxt in enumerate(pts):
+                pk = (t - 0.5 - 0.35 * k) / 0.5
+                if pk > 0:
+                    if k == 0 or pk < 0.05:
+                        pass
+                    sc = back_out(min(1, pk))
+                    y = H * 0.3 + s(40) * (1 - sc)
+                    h = H * 0.42
+                    d.rounded_rectangle([x + s(4), y + s(6), x + cw + s(4), y + h + s(6)], radius=s(14), fill=(0, 0, 0, 120))
+                    d.rounded_rectangle([x, y, x + cw, y + h], radius=s(14), fill=(24, 30, 22, int(250 * min(1, pk * 2))), outline=GREEN, width=s(2))
+                    d.text((x + s(14), y + s(10)), f"{k + 1:02d}", font=self.f_val, fill=GREEN)
+                    kind = icon_for_sentence(self.sector, ptxt, k)
+                    key = (kind, int(t * 6) % 6)
+                    if key not in icons:
+                        icons[key] = render_icon(kind, int(h * 0.42), t, 2)
+                    ic = icons[key]
+                    pil.paste(ic, (int(x + cw / 2 - ic.width / 2), int(y + h * 0.1)), ic)
+                    for j, ln_ in enumerate(_wrap(ptxt, f_p, int(cw - s(24)), 4)):
+                        d.text((x + s(12), y + h * 0.56 + j * s(24)), ln_, font=f_p, fill=(236, 240, 232))
+                    if 0 < pk < 0.15 and not getattr(self, "_oev", set()).__contains__(k):
+                        self._oev = getattr(self, "_oev", set()) | {k}; self.events.append((tt, "pop"))
+                x += cw + gap
+            # presenter waves goodbye on the right
+            lay_w = int(H * 0.5)
+            lay = Image.new("RGBA", (int(lay_w * self.ss), int(lay_w * self.ss)), (0, 0, 0, 0))
+            rig(ImageDraw.Draw(lay, "RGBA"), lay.width / 2, lay.height * 0.95, lay.height * 0.8, t, self.sector, "happy",
+                "wave" if t > 1.0 else "idle", 0, face=-1)
+            lay = lay.resize((lay_w, lay_w), Image.LANCZOS)
+            dx = int(W * 0.25 * (1 - _ease((t - 0.3) / 0.8)))
+            pil.paste(lay, (int(W * 0.89 - lay_w / 2 + dx), int(H * 0.8 - lay_w)), lay)
+            ft = _ease((t - 0.8) / 0.5)
+            d.text((W * 0.06, H * 0.79 + s(8)), f"{tag}  //  {self.title[:60].upper()}", font=self.f_hud, fill=GREEN + (int(255 * ft),))
+            d.text((W * 0.06, H * 0.83 + s(8)), "Figures shown are from the deck. Generated by Deck Narrator.", font=self.f_cap,
+                   fill=(170, 180, 166, int(255 * ft)))
+            fo = _ease((t - (n / fps - 0.6)) / 0.6)
+            if fo > 0:
+                d.rectangle([0, 0, W, H], fill=(0, 0, 0, int(255 * fo)))
+            transition(d, self.sec["motif"], W, H, _ease(t / 0.5), self.sec["accent"])
+            yield np.asarray(pil)
 
     _hook_ev = False
 
-    def background(self, t):
-        """Flat, clean backdrop: near-black with a soft green floor band and a few slow flat shapes."""
-        if getattr(self, "_bg", None) is None:
-            W, H = self.W, self.H
+    def background(self, t, ox=0.0):
+        """Flat near-black backdrop with two sector-themed parallax layers (far skyline/motif, near floor strip)."""
+        W, H = self.W, self.H
+        if self._layers is None:
             y = np.linspace(0, 1, H)[:, None, None]
             base = np.array([12, 14, 12], np.float32) + np.array([4, 10, 2], np.float32) * y
-            img = np.repeat(np.repeat(base, W, axis=1), 1, axis=2).astype(np.uint8).copy()
-            img[int(H * 0.8):int(H * 0.8) + 2] = (40, 62, 20)
-            self._bg = img
-        img = self._bg.copy()
+            far, near = backdrop_layers(self.sector, W, H)
+            fa = np.asarray(far, np.float32)
+            wide = np.repeat(base, far.width, axis=1)
+            a = fa[..., 3:4] / 255 * 0.85
+            wide = wide * (1 - a) + fa[..., :3] * a
+            na = np.asarray(near, np.float32)
+            y0 = int(H * 0.79)
+            self._layers = (wide.astype(np.uint8), na[y0:, :, :3], na[y0:, :, 3:4] / 255, y0, far.width)
+        wide, nrgb, na, y0, LW = self._layers
+        span = LW - W
+        fx = int((span * 0.5 + ox * 0.15 + t * self.s(6)) % span)
+        img = wide[:, fx:fx + W].copy()
+        nx = int((span * 0.5 + ox * 0.45 + t * self.s(14)) % span)
+        seg = img[y0:].astype(np.float32)
+        img[y0:] = (seg * (1 - na[:, nx:nx + W]) + nrgb[:, nx:nx + W] * na[:, nx:nx + W]).astype(np.uint8)
         return img
 
     def particles(self, img, t, near=False):   # flat style: no particle field
@@ -362,24 +493,49 @@ class ExplainerRenderer(HoloRenderer):
             acc += dur
         return out
 
-    def _beat_panel(self, d, beats, t, ox, cx, cy, size):
-        """Per-sentence visual beat: a flat illustration bounces in, a little figure reacts."""
+    def _beat_panel(self, pil, beats, t, ox, D):
+        """Per-sentence beat: a sector icon bounces onto a little stage and the presenter walks in and points at it.
+        Drawn on a supersampled layer (anti-aliased), then composited."""
+        W, H = self.W, self.H
         cur = 0
         for i, (a, _, _) in enumerate(beats):
             if t >= a:
                 cur = i
-        a, b_, sent = beats[cur]
-        p = (t - a) / 0.45
-        sc = back_out(p) * (1 if p >= 0 else 0)
-        if sc <= 0.02:
-            return
-        sx, sy = squash(min(1, max(0, (t - a - 0.25) / 0.35)))
-        kind = art_for(sent)
-        draw_art(d, kind, cx + ox, cy + size * 0.5 * (1 - sy), size * sc * sy, t, mood_for(sent))
-        if kind != "people":
-            pm = mood_for(sent)
-            pm = "wow" if pm == "neutral" and re.search(r"\d", sent) else pm
-            person(d, cx + ox + size * 0.62, cy + size * 0.5, size * 0.62 * back_out((t - a - 0.15) / 0.45), pm, t)
+        a, _, sent = beats[cur]
+        x0, y0, x1, y1 = int(W * 0.655), int(H * 0.17), int(W * 0.995), int(H * 0.79)
+        ss = self.ss
+        lw, lh = int((x1 - x0) * ss), int((y1 - y0) * ss)
+        lay = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
+        d = ImageDraw.Draw(lay, "RGBA")
+        L = lambda X, Y: ((X - x0 + ox) * ss, (Y - y0) * ss)
+        size = H * 0.3
+        gx, gy = L(W * 0.79, H * 0.66)
+        # stage
+        d.ellipse([gx - size * 0.62 * ss, gy - size * 0.07 * ss, gx + size * 0.62 * ss, gy + size * 0.07 * ss], fill=(30, 44, 22, 255), outline=GREEN + (255,), width=max(1, int(2 * ss)))
+        p = (t - a) / 0.5
+        if p > 0:
+            sc = back_out(min(1, p))
+            sx, sy = squash(min(1, max(0, (t - a - 0.3) / 0.35)))
+            u = size / 100 * ss * sc
+            kind = icon_for_sentence(self.sector, sent, cur)
+            if u > 0.05:
+                sector_icon(d, kind, gx, gy - size * 0.04 * ss, u * sy, t)
+        # presenter: walks in during the first beat, then idles / points / reacts
+        walk_in = _ease((t - 0.2) / 1.2)
+        px = W * (1.08 - 0.17 * walk_in)
+        walking = 1.0 if 0.2 < t < 1.4 else 0.0
+        leaving = t > D - 0.9
+        if leaving:
+            px += W * 0.2 * _ease((t - (D - 0.9)) / 0.8); walking = 1.0
+        pm = mood_for(sent)
+        pm = "wow" if pm == "neutral" and re.search(r"\d", sent) and (t - a) < 1.2 else pm
+        pose = "point" if not walking and (t - a) % 4 < 2.2 else "idle"
+        if pm == "worried" and not walking:
+            pose = "shrug"
+        X, Y = L(px, H * 0.74)
+        rig(d, X, Y, H * 0.36 * ss, t, self.sector, pm, pose, walking, face=-1)
+        lay = lay.resize((x1 - x0, y1 - y0), Image.LANCZOS)
+        pil.paste(lay, (x0, y0), lay)
 
     def _caption(self, d, beats, t, ox):
         W, H, s = self.W, self.H, self.s
@@ -451,22 +607,19 @@ class ExplainerRenderer(HoloRenderer):
             pin = 1 - _ease(t / 0.8)
             pout = _ease((t - (D - 0.7)) / 0.7)
             ox = W * 0.35 * pin - W * 0.35 * pout                    # camera pan between scenes
-            img = self.background(tt)
-            img = np.roll(img, int(ox * 0.25), axis=1)
-            self.particles(img, tt, near=False)
+            img = self.background(tt, ox)
             pil = Image.fromarray(img)
-            d = ImageDraw.Draw(pil, "RGBA")
+            d = FadeDraw(pil)
             self.frame_hud(d, plan["kind"].upper()[:7], idx, total, t)
             d.text((W * 0.06 + ox, H * 0.1), head[:58] + ("…" if len(head) > 58 else ""), font=self.f_head, fill=(255, 255, 255))
             d.line([(W * 0.06 + ox, H * 0.1 + s(46)), (W * 0.06 + ox + s(120) * _ease(t / 0.8), H * 0.1 + s(46))], fill=GREEN, width=s(3))
             target, _ = getattr(self, "_draw_" + plan["kind"])(d, pil, plan, t, D, ox, times, geo_cache)
             self._draw_beam(d, target if 0.9 < t < D - 0.8 else None, tt, H)
             if panel:
-                self._beat_panel(d, beats, t, ox, W * 0.81, H * 0.47, H * 0.28)
+                self._beat_panel(pil, beats, t, ox, D)
             self._caption(d, beats, t, ox)
-            img = np.asarray(pil).copy()
-            self._sweep(img, t, 0.5)
-            yield img
+            transition(d, self.sec["motif"], W, H, _ease(t / 0.5), self.sec["accent"])
+            yield np.asarray(pil)
 
     # ---------------- timing of reveals / highlights (from where things are mentioned in the narration)
     def _times(self, plan, narration, D):

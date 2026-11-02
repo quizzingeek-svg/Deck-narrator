@@ -267,7 +267,7 @@ def render_video_summary():
     st.write("Generates a short animated **MP4 explainer** of the deck: key points, headline numbers and charts redrawn "
              "from your slides, and a voiceover in your narration language. No AI key needed.")
     style = st.selectbox("Visual style", STYLES, index=0, key="vs_style",
-                         help="Animated Explainer (default): flat cartoon infographic scenes rebuilt from your deck's real numbers, charts, "
+                         help="Animated Explainer (default): HD sector-themed cartoon (cold open on your deck's biggest number, a presenter character, sector icons and backdrop) with scenes rebuilt from your deck's real numbers, charts, "
                               "tables and countries, with a beat per sentence. Holographic: cinematic 3D HUD with a tilted holo-panel. AI Presenter: NOVA, a robot host, "
                               "narrates beside a big holo-screen showing your slides. Classic: the simpler HUD look.")
     photo_up, pname = None, ""
@@ -281,12 +281,21 @@ def render_video_summary():
                           "it is never stored on the server or sent anywhere. Only upload a photo you have the right to use.")
         pname = pc[2].text_input("Presenter name (optional)", key="vs_name", max_chars=28,
                                  placeholder="NOVA" if not photo_up else "e.g. Mohit")
-    sfx = True
+    sfx, sector = True, "Auto-detect"
     if style.startswith("Animated"):
-        sfx = st.toggle("🔊 Subtle sound effects (whooshes and ticks, mixed low under the voice)", value=True, key="vs_sfx")
+        from core.sectors import SECTOR_NAMES, detect_sector
+        from core.video_summary import deck_text
+        sc = st.columns([1.3, 1.7])
+        guess = detect_sector(deck_text(slides))
+        sector = sc[0].selectbox("Sector style", SECTOR_NAMES, index=0, key="vs_sector",
+                                 help=f"Auto-detect reads the deck and picks the cartoon theme (icons, backdrop, presenter outfit, "
+                                      f"transitions, sound motif). Detected for this deck: {guess}.")
+        sc[0].caption(f"🎨 Auto-detected: **{guess}**")
+        sfx = sc[1].toggle("🔊 Sound design (sector motif, whooshes and ticks, mixed low under the voice)", value=True, key="vs_sfx")
     c = st.columns([1.2, 1, 1.4])
     quality = c[0].selectbox("Quality", list(QUALITY), index=0, key="vs_quality",
-                             help="Fast (540p) renders about 2x quicker, which is best on Streamlit Cloud. HD (720p) looks sharper.")
+                             help="HD (720p) is the default and the sweet spot on Streamlit Cloud. Fast (540p) renders about 1.7x quicker. "
+                                  "Full HD (1080p) is sharpest but roughly 2x slower than 720p.")
     k = c[1].slider("Key points", 3, 8, min(6, max(3, N - 1)), key="vs_k")
     c[2].caption(f"🌐 Voice: **{lang}** · {voice or 'auto'}<br>✍️ Script: "
                  + ("AI (falls back to the built-in narrator automatically)" if cfg.ready and ai_status(cfg) is None
@@ -309,7 +318,7 @@ def render_video_summary():
         try:
             r = make_video_summary(slides, str(out), deck_name=ss.deck_name, cfg=cfg if cfg.ready else None, lang=lang,
                                    voice=voice or None, rate=rate, pitch=pitch, engine=engine, keys=keys, quality=quality, k=k, style=style,
-                                   photo=photo_path, presenter_name=pname, sfx=sfx,
+                                   photo=photo_path, presenter_name=pname, sfx=sfx, sector=sector,
                                    translate_fn=tr, progress=lambda f, m: bar.progress(min(1.0, f), m))
             ss.vsum = r
         except Exception as e:

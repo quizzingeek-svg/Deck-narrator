@@ -28,7 +28,8 @@ from .narrate import FIRST, LAST, MID, _rng, _sentences, classify, narrate
 GREEN = (134, 188, 37)          # Deloitte green dot #86BC25
 WHITE = (255, 255, 255)
 GREY = (150, 150, 150)
-QUALITY = {"Fast (540p)": (960, 540, 20), "HD (720p)": (1280, 720, 24)}
+QUALITY = {"HD (720p)": (1280, 720, 24), "Fast (540p)": (960, 540, 20), "Full HD (1080p, slow)": (1920, 1080, 24)}
+DEFAULT_QUALITY = "HD (720p)"
 TARGET_WORDS = (150, 260)       # ~60-120 s of speech
 
 
@@ -550,6 +551,40 @@ def _hook(slides: List[Slide]) -> dict:
     return {}
 
 
+def _tone(sr, dur, f, decay, amp=0.6, sweep=0.0):
+    tt = np.arange(int(dur * sr)) / sr
+    return (np.sin(2 * np.pi * f * tt * (1 + sweep * tt)) * np.exp(-tt * decay) * amp).astype(np.float32)
+
+
+def _cat(*parts, gap=0.0, sr=44100):
+    out = np.zeros(0, np.float32)
+    for p in parts:
+        out = np.concatenate([out, p, np.zeros(int(gap * sr), np.float32)])
+    return out
+
+
+# sector sound motifs (scene entry), all quiet synthesised stingers
+MOTIFS = {
+    "ping": lambda sr: _tone(sr, .9, 1180, 5, .5) + np.pad(_tone(sr, .6, 1180, 7, .18), (int(.3 * sr), 0))[:int(.9 * sr)],   # radar ping + echo
+    "beat": lambda sr: _cat(_tone(sr, .12, 70, 25, .9), _tone(sr, .14, 60, 22, .7), gap=.08, sr=sr),                          # heartbeat
+    "coin": lambda sr: _tone(sr, .35, 2100, 12, .35) + _tone(sr, .35, 3150, 14, .25),                                          # coin clink
+    "blip": lambda sr: _cat(_tone(sr, .06, 1600, 40, .4), _tone(sr, .06, 2000, 40, .4), _tone(sr, .08, 2400, 30, .4), gap=.03, sr=sr),
+    "hum": lambda sr: _tone(sr, .8, 110, 3, .5, 0.4) * np.sin(np.linspace(0, np.pi, int(.8 * sr))).astype(np.float32),
+    "chime": lambda sr: _tone(sr, .8, 880, 5, .35) + _tone(sr, .8, 1320, 6, .2),
+    "slam": lambda sr: _tone(sr, .5, 55, 9, 1.0) + _tone(sr, .5, 110, 12, .4),
+}
+
+
+def deck_text(slides) -> str:
+    out = []
+    for sl in slides:
+        out += [sl.title or "", "\n".join(sl.bullets or []), sl.notes or ""]
+        for tb in sl.tables or []:
+            out += [" ".join(map(str, r)) for r in tb]
+        out += [str(c.get("title", "")) for c in sl.charts or []]
+    return "\n".join(out)
+
+
 def make_sfx(events, total_s: float, path: str, sr: int = 44100, gain: float = 0.16):
     """Synthesised, quiet sound design: soft whooshes on scene cuts, light ticks/pops on reveals. Mono 16-bit WAV."""
     import wave
@@ -564,6 +599,8 @@ def make_sfx(events, total_s: float, path: str, sr: int = 44100, gain: float = 0
             x = np.convolve(x, np.ones(24, np.float32) / 24, mode="same")
             env = np.sin(np.linspace(0, np.pi, L)) ** 2
             y = x * env * 0.9
+        elif kind in MOTIFS:
+            y = MOTIFS[kind](sr)
         else:
             L = int(0.09 * sr)
             tt = np.arange(L) / sr
@@ -581,10 +618,10 @@ def make_sfx(events, total_s: float, path: str, sr: int = 44100, gain: float = 0
 STYLES = ["Animated Explainer", "Holographic (cinematic)", "AI Presenter (robot)", "Classic HUD"]
 
 
-def render_video(slides: List[Slide], segs: List[Segment], out_path: str, quality: str = "Fast (540p)",
+def render_video(slides: List[Slide], segs: List[Segment], out_path: str, quality: str = DEFAULT_QUALITY,
                  lang_label: str = "", deck_title: str = "", style: str = STYLES[0],
                  photo: Optional[str] = None, presenter_name: str = "", progress: Optional[Callable[[float, str], None]] = None,
-                 sfx: bool = True) -> dict:
+                 sfx: bool = True, sector: str = "Auto-detect") -> dict:
     """Segments must have .audio set. Writes an MP4 (H.264 + AAC). Returns stats."""
     W, H, fps = QUALITY[quality]
     ff = ffmpeg_bin()
@@ -613,7 +650,9 @@ def render_video(slides: List[Slide], segs: List[Segment], out_path: str, qualit
                                  enc_out], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         if style.startswith("Animated"):
             from .explainer import ExplainerRenderer
-            r = ExplainerRenderer(W, H, fps, deck_title or _deck_title(slides), lang_label, hook=_hook(slides))
+            from .sectors import resolve
+            sector = resolve(sector, deck_text(slides))
+            r = ExplainerRenderer(W, H, fps, deck_title or _deck_title(slides), lang_label, hook=_hook(slides), sector=sector)
         elif style.startswith("Classic"):
             r = Renderer(W, H, fps, deck_title or _deck_title(slides), lang_label)
         else:
@@ -642,6 +681,7 @@ def render_video(slides: List[Slide], segs: List[Segment], out_path: str, qualit
                             "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_path],
                            check=True, capture_output=True, timeout=600)
         return {"seconds": round(dur, 1), "frames": done, "render_s": round(time.time() - t0, 1), "size": f"{W}x{H}@{fps}", "style": style,
+                "sector": getattr(r, "sector", ""),
                 "path": out_path}
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -649,8 +689,8 @@ def render_video(slides: List[Slide], segs: List[Segment], out_path: str, qualit
 
 def make_video_summary(slides: List[Slide], out_path: str, *, deck_name: str = "", cfg=None, lang: str = "English (US)",
                        voice: Optional[str] = None, rate: int = 0, pitch: int = 0, engine: Optional[str] = None,
-                       keys: Optional[dict] = None, quality: str = "Fast (540p)", k: int = 6, translate_fn=None, style: str = STYLES[0],
-                       photo: Optional[str] = None, presenter_name: str = "", sfx: bool = True,
+                       keys: Optional[dict] = None, quality: str = DEFAULT_QUALITY, k: int = 6, translate_fn=None, style: str = STYLES[0],
+                       photo: Optional[str] = None, presenter_name: str = "", sfx: bool = True, sector: str = "Auto-detect",
                        progress: Optional[Callable[[float, str], None]] = None) -> dict:
     """Full pipeline: script -> (translate) -> voice -> frames -> MP4. progress(fraction, text)."""
     from .tts import ENGINES, synthesize
@@ -677,7 +717,7 @@ def make_video_summary(slides: List[Slide], out_path: str, *, deck_name: str = "
                 notes.append(a["warning"])
             prog(0.05 + 0.2 * (j + 1) / len(segs), f"Voiceover {j + 1}/{len(segs)} ready")
     t_audio = time.time() - t0
-    st = render_video(slides, segs, out_path, quality, lang, _deck_title(slides, deck_name), style=style, photo=photo, presenter_name=presenter_name, sfx=sfx,
+    st = render_video(slides, segs, out_path, quality, lang, _deck_title(slides, deck_name), style=style, photo=photo, presenter_name=presenter_name, sfx=sfx, sector=sector,
                       progress=lambda f, m: prog(0.25 + 0.75 * f, m))
     prog(1.0, "Done")
     st.update(script=script_text(segs), source=source, notes=sorted(set(notes)), total_s=round(time.time() - t0, 1),
