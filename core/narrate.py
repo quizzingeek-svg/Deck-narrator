@@ -17,7 +17,7 @@ from typing import List, Optional, Tuple
 from .deck import Slide
 from .insights import slide_facts
 
-MAX_RUN = 5  # longest run of ordinary slide/notes words allowed in the script
+MAX_RUN = 8  # longest run of ordinary slide/notes words allowed in the script
 
 # --------------------------------------------------------------------------- vocabulary
 SYN = {
@@ -74,19 +74,19 @@ SYN = {
     "time": ["period", "stretch"], "year": ["twelve months"], "years": ["years"], "against": ["versus", "relative to"], "begin": ["start", "kick off"], "start": ["begin", "kick off"],
 }
 OPENERS = {
-    "title": ["Good to have everyone here. Today's story is about {t}.", "Let's get started. The topic in front of us is {t}.",
-              "Thanks for joining. Over the next few minutes we'll unpack {t}."],
+    "title": ["Good to have everyone here. Today's story: {t}.", "Let's get started. The topic in front of us: {t}.",
+              "Thanks for joining. Over the next few minutes we'll unpack this: {t}."],
     "agenda": ["Here's the road map for our time together.", "Before we dive in, a quick look at where we're headed.",
                "Let me lay out how this conversation will flow."],
-    "data": ["Let's look at what the numbers are telling us on {t}.", "The data on {t} is worth a closer look.",
+    "data": ["Let's look at what the numbers are telling us: {t}.", "The data here is worth a closer look: {t}.",
              "Here's where the evidence comes in: {t}."],
-    "chart": ["This chart tells a clear story about {t}.", "Look at the shape of this chart on {t}.",
-              "The picture here, {t}, is worth a moment."],
-    "comparison": ["This one is a side-by-side: {t}.", "Let's weigh the options on {t}.", "Here we put things head to head: {t}."],
-    "process": ["So how do we actually do it? {t}.", "Let me walk you through the sequence: {t}.", "Here's the step-by-step on {t}."],
+    "chart": ["This chart tells a clear story: {t}.", "Look at the shape of this chart: {t}.",
+              "This picture is worth a moment: {t}."],
+    "comparison": ["This one is a side-by-side: {t}.", "Let's weigh the options: {t}.", "Here we put things head to head: {t}."],
+    "process": ["So how do we actually do it? {t}.", "Let me walk you through the sequence: {t}.", "Here's the step-by-step: {t}."],
     "quote": ["I want to pause on a line that captures this well.", "One voice sums it up nicely here."],
     "conclusion": ["Which brings us to the bottom line: {t}.", "Let's land this. {t}.", "So where does this leave us? {t}."],
-    "content": ["Now let's turn to {t}.", "Next up, {t}.", "Shifting gears, let's talk about {t}.", "Here's the next piece: {t}.",
+    "content": ["Now let's turn to the next point: {t}.", "Next up, {t}.", "Shifting gears: {t}.", "Here's the next piece: {t}.",
                 "Building on that, {t}.", "This brings us to {t}."],
 }
 FIRST = ["The first thing to notice is that", "To start with,", "Most importantly,", "The headline here is that"]
@@ -101,16 +101,17 @@ SOWHAT = {
     "process": ["The point is that each step de-risks the next one.", "Sequencing it this way keeps risk low and learning high."],
     "agenda": ["Keep that structure in mind; each section builds on the last."],
     "conclusion": ["That's the decision in front of us.", "If we agree on this, we can move straight to action."],
-    "content": ["Why does this matter? Because it changes how we prioritise {k}.", "The so-what: {k} is where we should focus our attention.",
-                "Put simply, {k} is the lever that matters here.", "The implication is clear: we can't ignore {k}."],
+    "content": ["Why does this matter? Because it changes where we should put our effort next.",
+                "The so-what: this is where we should focus our attention.", "Put simply, this is the lever that matters here.",
+                "The implication is clear: this is not something we can ignore."],
 }
-for _bad in ("target","year","only","since","new","first","data","demand","high","low","should","then","away","time",
+for _bad in ("lead","leads","risk","risks","gap","across","budget","procurement","investment","spending","target","year","only","since","new","first","data","demand","high","low","should","then","away","time",
              "number","second","next","right","make","making","every","level","levels","defense","military","world",
              "people","cities","share","value","model","point","big","think","today","add","bet","win","want","piece"):
     SYN.pop(_bad, None)
 BOILER = re.compile(r"(?i)\b(illustrative|sample data|for testing|confidential|copyright|©|all rights reserved|source:|disclaimer|page \d+)")
-TRANS = ["That sets us up for the next topic: {n}.", "With that in mind, let's move to {n}.", "Which leads naturally to {n}.",
-         "Keep that in mind as we look at {n}.", "Next, we'll see how this connects to {n}."]
+TRANS = ["That sets us up for the next topic: {n}.", "With that in mind, let's move on: {n}.", "Which leads naturally to the next point: {n}.",
+         "Keep that in mind for the next slide: {n}.", "Next, we'll see how this connects: {n}."]
 PHRASES = [(r"\bI want to\b", "I'd like to"), (r"\bwe think\b", "we believe"), (r"\bwalk you through\b", "take you through"),
            (r"\bhow big\b", "just how large"), (r"\bthe point to take away\b", "the key message"), (r"\bnot a bubble\b", "not a passing bubble"),
            (r"\bit will take\b", "it'll take"), (r"\bdon't need\b", "can skip"), (r"\bdo not\b", "don't"), (r"\bit is\b", "it's"),
@@ -148,6 +149,9 @@ def _lc_title(t: str) -> str:
     t = " ".join(w.title() if w.isupper() and len(w) > 3 and not re.search(r"\d", w) else w for w in t.split())
     t = re.sub(r"\s*[|:]\s*", ", ", t)
     w0 = t.split()[0] if t.split() else ""
+    ws = [w for w in t.split() if w[:1].isalpha() and w.lower() not in STOP]
+    if len(ws) > 1 and sum(w[0].isupper() for w in ws[1:]) >= max(1, (len(ws) - 1) * 0.6):
+        return t
     if w0 and not (w0.isupper() or (len(w0) > 1 and w0[1].isupper()) or w0 in ("India", "US", "China", "Europe") or was_caps):
         t = t[:1].lower() + t[1:]
     return t
@@ -175,6 +179,40 @@ def classify(s: Slide, i: int, n: int) -> str:
     return "content"
 
 
+VERB = re.compile(r"(?i)\b(is|are|was|were|has|have|had|will|can|could|should|must|reach(es)?|grew|grow[sn]?|drive[sn]?|rose|rise[sn]?|fell|falls?|remains?|leads?|makes?|takes?|needs?|shows?|outpaces?|scales?|doubles?|hits?|covers?|accounts? for|expects?|trails?|lags?|tops?|beats?|[a-z]{4,}ed)\b")
+IMPER = re.compile(r"(?i)^(prioriti[sz]e|fund|modernise|modernize|open|hire|pilot|reprice|scale|tighten|expand|invest|build|launch|cut|focus|enter|partner|create|reduce|improve|accelerate|adopt|deploy|secure|develop|review|set up|establish|grow|protect|move|start|stop|close|exit)\b")
+def _complete(t: str) -> str:
+    """Turn note-style fragments ("spending up 14%") into full sentences."""
+    m = re.match(r"(?i)^((?:\w+\s){0,4}?\w+)\s+(driven|fuelled|fueled|caused|led|held back|offset)\s+by\b(.*)$", t)
+    if m and not VERB.search(m.group(1)):
+        subj = m.group(1); art = "" if subj.split()[0].lower() in ("the", "this", "our", "a", "an") or re.match(r"[A-Z]{2}|[A-Z][a-z]+ [A-Z]", subj) else "the "
+        subj = subj if re.match(r"[A-Z]{2}|[A-Z][a-z]+ [A-Z]", subj) else subj[:1].lower() + subj[1:]
+        return f"{art}{subj} is {m.group(2)} by{m.group(3)}"
+    m = re.match(r"(?i)^(break-even|breakeven|payback|launch|go-live|profitability)\s+(in|by)\s+(.+)$", t)
+    if m and not VERB.search(t):
+        return f"{m.group(1)} comes {m.group(2)} {m.group(3)}"
+    if VERB.search(t):
+        t = re.sub(r"(?i)\b(\w+s)\s+(rising|falling|growing|increasing|declining)\b", r"\1 are \2", t)
+        return t
+    m = re.match(r"(?i)^(.+?)\s+(up|down|at|near|around|about|below|above|over|under)\s+(.*\d.*)$", t)
+    if m:
+        subj = m.group(1)
+        v = "are" if re.search(r"(?i)\b\w+s$", subj) and not re.search(r"(?i)(ss|us|is)$", subj) else "is"
+        return f"{subj} {v} {m.group(2)} {m.group(3)}"
+    m = re.match(r"(?i)^(.+?)\s+(below|above|under|over|ahead of|behind)\s+(.+)$", t)
+    if m:
+        subj = m.group(1)
+        v = "are" if re.search(r"(?i)\w+s$", subj) and not re.search(r"(?i)(ss|us|is)$", subj) else "is"
+        return f"{subj} {v} {m.group(2)} {m.group(3)}"
+    m = re.match(r"^(.+?[a-zA-Z)])\s+((?:about |roughly |more than )?[$€£₹]?\d[\d,.]*.*)$", t)
+    if m and len(m.group(1).split()) <= 8 and not re.search(r"(?i)\b(month|months|year|years|week|day|phase|step|stage|by|in|FY|Q)$", m.group(1)):
+        return f"{m.group(1)} is {m.group(2)}"
+    m = re.match(r"(?i)^(.+?\w+s)\s+(rising|falling|growing|increasing|declining)\b(.*)$", t)
+    if m:
+        return f"{m.group(1)} are {m.group(2)}{m.group(3)}"
+    return t
+
+
 def _rewrite(text: str, rng: random.Random) -> str:
     """Phrase-level paraphrase of one bullet or notes sentence."""
     t = _clean(text)
@@ -191,7 +229,9 @@ def _rewrite(text: str, rng: random.Random) -> str:
     if m:
         lab, det = m.group(1).strip(), m.group(2).strip()
         lab_l = lab if re.match(r"[A-Z]{2,}|[A-Z][a-z]+\s[A-Z]", lab) else lab[:1].lower() + lab[1:]
-        t = rng.choice(["when it comes to {l}, {d}", "on {l}, {d}", "for {l}, {d}"]).format(l=lab_l, d=det[:1].lower() + det[1:] if not re.match(r"[A-Z]{2}|[A-Z][a-z]+ [A-Z]", det) else det)
+        cd = _complete(det)
+        t = (f"on the {lab_l}, {cd}" if cd != det else (f"for {lab_l}, it's {det}" if not VERB.search(det) else f"on {lab_l}, {det}"))
+        return t.rstrip(".;,")
     # word-level synonyms (skip capitalised names and figures)
     out = []
     for w in re.findall(r"\w[\w'\-]*|[^\w\s]+|\s+", t):
@@ -201,7 +241,7 @@ def _rewrite(text: str, rng: random.Random) -> str:
             w = rep.capitalize() if w[0].isupper() and not w.isupper() else rep
         out.append(w)
     t = "".join(out).strip()
-    return t.rstrip(".;,")
+    return _complete(t.rstrip(".;,"))
 
 
 def _exempt(w: str) -> bool:
@@ -275,12 +315,7 @@ def _break_runs(script: str, source: str, rng: random.Random, limit: int = MAX_R
                 if opts:
                     toks[idx[wi]] = rng.choice(opts); done = True; break
         if not done:
-            aux = [wi for wi in span[1:-1] if words[wi].lower() in AUX]
-            if aux:   # "is" -> "is clearly"
-                wi = aux[0]; toks[idx[wi]] = toks[idx[wi]] + " " + rng.choice(INSERTS)
-            else:
-                wi = span[len(span) // 2]
-                toks[idx[wi]] = rng.choice(["—", ", really,", ", in short,"]) + " " + toks[idx[wi]] if False else ", and " + toks[idx[wi]] if words[wi].lower() in ("with", "so", "but") else rng.choice(INSERTS) + " " + toks[idx[wi]]
+            return "".join(toks)   # never inject filler words mid-phrase
         script = "".join(toks)
     return script
 
@@ -324,7 +359,7 @@ def narrate(slides: List[Slide], i: int, notes_mode: str = "guide", deck_key: st
     pool = OPENERS[kind]
     paras.append(pool[(i + rng.randrange(len(pool))) % len(pool)].format(t=title))
 
-    bullets = [_clean(b) for b in s.bullets if _usable(_clean(b)) and not BOILER.search(b)]
+    bullets = [_clean(b) for b in s.bullets if _usable(_clean(b)) and not BOILER.search(b) and (len(_clean(b).split()) >= 3 or re.search(r'\d', b))]
     if s.charts or s.tables:   # drop short axis / legend labels that leak in as text boxes
         bullets = [b for b in bullets if len(b.split()) >= 5]
     notes = s.notes.strip() if notes_mode == "guide" else ""
@@ -370,6 +405,9 @@ def narrate(slides: List[Slide], i: int, notes_mode: str = "guide", deck_key: st
             if kind == "process" and re.match(r"(?i)(phase|step|stage)\s*\d", line):
                 ph = sum(1 for x in lines[:k] if re.match(r"(?i)(phase|step|stage)\s*\d", x))
                 con = ["We kick off with", "From there, we move to", "Then comes", "After that,", "And finally,"][min(ph, 4)]
+            if IMPER.match(line) and kind != "process":
+                con = ["First, we should", "We should also", "And finally, we should"][0 if k == 0 else (2 if k == len(lines) - 1 and k > 0 else 1)]
+                r = r[:1].lower() + r[1:] if not re.match(r"[A-Z]{2}", r) else r
             r0 = r[:1].lower() + r[1:] if not re.match(r"[A-Z]{2}|[A-Z][a-z]+ [A-Z]|I\b", r) else r
             body.append(f"{con} {r0}")
         if rest:

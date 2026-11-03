@@ -45,7 +45,7 @@ def chart_facts(c: dict) -> List[str]:
             out.append(f"The peak is {_fmt(hi[1])} in {hi[0]} and the low point is {_fmt(lo[1])} in {lo[0]}.")
         jumps = [(vals[i][0], vals[i + 1][0], vals[i + 1][1] - vals[i][1]) for i in range(len(vals) - 1)]
         big = max(jumps, key=lambda j: abs(j[2]))
-        out.append(f"The biggest single step is between {big[0]} and {big[1]} ({big[2]:+,.0f}).")
+        out.append(f"The biggest single step is between {big[0]} and {big[1]} ({(f"{big[2]:+,.0f}" if abs(big[2]-round(big[2]))<1e-9 or abs(big[2])>=100 else f"{big[2]:+,.1f}")}).")
     return out
 
 
