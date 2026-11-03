@@ -104,6 +104,11 @@ SOWHAT = {
     "content": ["Why does this matter? Because it changes how we prioritise {k}.", "The so-what: {k} is where we should focus our attention.",
                 "Put simply, {k} is the lever that matters here.", "The implication is clear: we can't ignore {k}."],
 }
+for _bad in ("target","year","only","since","new","first","data","demand","high","low","should","then","away","time",
+             "number","second","next","right","make","making","every","level","levels","defense","military","world",
+             "people","cities","share","value","model","point","big","think","today","add","bet","win","want","piece"):
+    SYN.pop(_bad, None)
+BOILER = re.compile(r"(?i)\b(illustrative|sample data|for testing|confidential|copyright|©|all rights reserved|source:|disclaimer|page \d+)")
 TRANS = ["That sets us up for the next topic: {n}.", "With that in mind, let's move to {n}.", "Which leads naturally to {n}.",
          "Keep that in mind as we look at {n}.", "Next, we'll see how this connects to {n}."]
 PHRASES = [(r"\bI want to\b", "I'd like to"), (r"\bwe think\b", "we believe"), (r"\bwalk you through\b", "take you through"),
@@ -319,7 +324,7 @@ def narrate(slides: List[Slide], i: int, notes_mode: str = "guide", deck_key: st
     pool = OPENERS[kind]
     paras.append(pool[(i + rng.randrange(len(pool))) % len(pool)].format(t=title))
 
-    bullets = [_clean(b) for b in s.bullets if _usable(_clean(b))]
+    bullets = [_clean(b) for b in s.bullets if _usable(_clean(b)) and not BOILER.search(b)]
     if s.charts or s.tables:   # drop short axis / legend labels that leak in as text boxes
         bullets = [b for b in bullets if len(b.split()) >= 5]
     notes = s.notes.strip() if notes_mode == "guide" else ""
@@ -343,11 +348,18 @@ def narrate(slides: List[Slide], i: int, notes_mode: str = "guide", deck_key: st
                         + (", and finish with " + items[-1] if len(items) > 1 else ""))
     else:
         src_sents = _sentences(notes) if notes else []
-        lines = (src_sents[:5] if src_sents else []) + bullets[: (3 if src_sents else 6)]
+        # presenter style: don't read every bullet - lead with the ones carrying numbers, max 3 (2 when notes exist)
+        ranked = sorted(bullets, key=lambda b: (not re.search(r"\d", b), bullets.index(b)))
+        keep = set(ranked[: (2 if src_sents else 3)])
+        lines = (src_sents[:4] if src_sents else []) + [b for b in bullets if b in keep]
+        if len(bullets) > len(keep) and not src_sents:
+            lines.append("__REST__")
         if kind == "quote" and bullets:
             body.append("In their words: " + bullets[0])
             lines = lines[1:]
         mids = rng.sample(MID, len(MID)) * 3
+        rest = "__REST__" in lines
+        lines = [x for x in lines if x != "__REST__"]
         for k, line in enumerate(lines):
             pm = re.match(r"(?i)^(phase|step|stage)\s*(\d+)\s*(?:\(([^)]*)\))?\s*[:\-–]\s*(.+)$", line) if kind == "process" else None
             r = (f"{pm.group(1).lower()} {pm.group(2)}" + (f", in {pm.group(3)}" if pm.group(3) else "") + ", "
@@ -360,6 +372,8 @@ def narrate(slides: List[Slide], i: int, notes_mode: str = "guide", deck_key: st
                 con = ["We kick off with", "From there, we move to", "Then comes", "After that,", "And finally,"][min(ph, 4)]
             r0 = r[:1].lower() + r[1:] if not re.match(r"[A-Z]{2}|[A-Z][a-z]+ [A-Z]|I\b", r) else r
             body.append(f"{con} {r0}")
+        if rest:
+            body.append(rng.choice(["The rest of the detail is on the slide for you to read", "There's more detail on the slide, but those are the points that matter"]))
         facts = slide_facts(s)
         if facts:
             body.append(rng.choice(["Reading the numbers,", "If we look closely at the data,", "Digging into the figures,"])
